@@ -3,5 +3,6 @@ flask-cors
 pandas
 numpy
 joblib
-tensorflow-cpu
+scikit-learn
+tensorflow
 gunicorn
