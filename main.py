@@ -4,43 +4,48 @@ import numpy as np
 import joblib
 import tensorflow as tf
 import keras
-from flask import Flask, jsonify
+import google.generativeai as genai  # <--- NUEVO
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# --- PARCHE DE EMERGENCIA PARA DENSE LAYER ---
-# Esto obliga a Keras a ignorar el argumento 'quantization_config' que causa el error
+# --- CONFIGURACIÓN DE GEMINI ---
+# Reemplaza con la llave que obtuviste en Google AI Studio
+genai.configure(api_key="TU_API_KEY_AQUÍ")
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+
+# --- PARCHE DE EMERGENCIA PARA DENSE LAYER (MANTENIDO) ---
 @keras.saving.register_keras_serializable()
 class CustomDense(keras.layers.Dense):
     def __init__(self, *args, **kwargs):
-        kwargs.pop('quantization_config', None) # Eliminamos el culpable
+        kwargs.pop('quantization_config', None)
         super().__init__(*args, **kwargs)
 
 def cargar_recursos():
     base_path = os.path.dirname(os.path.abspath(__file__))
     modelos = {}
     try:
-        # Carga de Scikit-Learn (sin problemas)
         modelos["asistencia"] = joblib.load(os.path.join(base_path, "model_attendance_v2.joblib"))
         modelos["rentabilidad"] = joblib.load(os.path.join(base_path, "model_profitability_v2.joblib"))
         modelos["segmentos"] = joblib.load(os.path.join(base_path, "model_segments_v2.joblib"))
         
-        # Carga de Keras con el parche aplicado
         ruta_h5 = os.path.join(base_path, "model_revenue_v2.h5")
         modelos["revenue"] = keras.models.load_model(
             ruta_h5, 
-            custom_objects={"Dense": CustomDense}, # Usamos nuestro parche
+            custom_objects={"Dense": CustomDense},
             compile=False
         )
-        print("✅ SISTEMA OPERATIVO: Parche aplicado con éxito.")
+        print("✅ SISTEMA OPERATIVO: Modelos cargados con éxito.")
         return modelos, None
     except Exception as e:
+        print(f"❌ Error carga: {e}")
         return None, str(e)
 
 MODELS, ERROR_MSG = cargar_recursos()
 
+# --- RUTA DASHBOARD (MANTENIDA EXACTAMENTE IGUAL) ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
@@ -59,7 +64,6 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float((df['VALOR_TICKET'] + df['VALOR_CONSUMIBLE']).mean())
 
-        # Predicciones
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
         p_asistencia = int(t_apuntados * MODELS["asistencia"].predict_proba(test_df)[0][1])
         res_prof = "Optima" if MODELS["rentabilidad"].predict(test_df)[0] == 1 else "Baja"
@@ -75,10 +79,43 @@ def get_dashboard():
             "pred_asistencia": p_asistencia,
             "rentabilidad": res_prof,
             "perfil": res_seg,
-            "revenue": f"${pred_rev:,.2f}"
+            "revenue": f"${pred_rev:,.2f}",
+            "ticket_promedio": avg_costo # Útil para que la IA haga cálculos
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# --- NUEVA RUTA: CHATBOT INTERACTIVO ---
+@app.route('/api/v1/chat', methods=['POST'])
+def chat_interactivo():
+    try:
+        data_request = request.json
+        pregunta_usuario = data_request.get("pregunta")
+        contexto_modelos = data_request.get("contexto", {})
+
+        # Construcción del prompt estratégico
+        prompt = f"""
+        Actúa como un Consultor Estratégico de Eventos con IA.
+        DATOS ACTUALES DEL EVENTO (Extraídos de modelos de ML):
+        - Registrados: {contexto_modelos.get('registrados')}
+        - Predicción Asistencia: {contexto_modelos.get('pred_asistencia')}
+        - Perfil: {contexto_modelos.get('perfil')}
+        - Ingresos Estimados: {contexto_modelos.get('revenue')}
+        - Ticket Promedio: {contexto_modelos.get('ticket_promedio')}
+
+        PREGUNTA DEL CLIENTE: "{pregunta_usuario}"
+
+        TAREA: 
+        Responde a la pregunta. Si el cliente propone cambios (como subir a 5000 personas), 
+        usa los datos de arriba para hacer una estimación rápida y profesional. 
+        Sé conciso y da consejos de valor (logística, marketing o finanzas).
+        """
+
+        response = gemini_model.generate_content(prompt)
+        return jsonify({"respuesta": response.text})
+    
+    except Exception as e:
+        return jsonify({"respuesta": f"Error en el cerebro de IA: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
