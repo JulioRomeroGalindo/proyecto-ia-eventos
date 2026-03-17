@@ -6,13 +6,15 @@ import tensorflow as tf
 from flask import Flask, jsonify
 from flask_cors import CORS
 
+# Forzar a Keras a usar el formato moderno si es necesario
+os.environ["KERAS_BACKEND"] = "tensorflow"
+
 app = Flask(__name__)
 CORS(app)
 
-# --- SISTEMA DE CARGA DINÁMICA ---
+# --- SISTEMA DE CARGA CON PARCHE DE COMPATIBILIDAD ---
 def cargar_recursos():
-    # Buscamos en la carpeta actual y en la carpeta del script
-    posibles_rutas = [os.getcwd(), os.path.dirname(os.path.abspath(__file__))]
+    base_path = os.path.dirname(os.path.abspath(__file__))
     nombres = {
         "asistencia": "model_attendance_v2.joblib",
         "rentabilidad": "model_profitability_v2.joblib",
@@ -20,48 +22,47 @@ def cargar_recursos():
         "revenue": "model_revenue_v2.h5"
     }
     
-    modelos_cargados = {}
+    recursos = {}
     
     try:
-        for nick, archivo in nombres.items():
-            encontrado = False
-            for ruta in posibles_rutas:
-                ruta_completa = os.path.join(ruta, archivo)
-                if os.path.exists(ruta_completa):
-                    if archivo.endswith('.h5'):
-                        modelos_cargados[nick] = tf.keras.models.load_model(ruta_completa, compile=False)
-                    else:
-                        modelos_cargados[nick] = joblib.load(ruta_completa)
-                    print(f"✅ Cargado: {archivo} desde {ruta}")
-                    encontrado = True
-                    break
-            
-            if not encontrado:
-                print(f"❌ No se encontró: {archivo}")
-                return None, f"Archivo faltante: {archivo}. Vistos: {os.listdir(posibles_rutas[0])}"
+        # Carga de modelos Joblib (Scikit-Learn)
+        recursos["asistencia"] = joblib.load(os.path.join(base_path, nombres["asistencia"]))
+        recursos["rentabilidad"] = joblib.load(os.path.join(base_path, nombres["rentabilidad"]))
+        recursos["segmentos"] = joblib.load(os.path.join(base_path, nombres["segmentos"]))
         
-        return modelos_cargados, None
+        # Carga de modelo H5 (TensorFlow/Keras) con PARCHE para 'quantization_config'
+        ruta_h5 = os.path.join(base_path, nombres["revenue"])
+        recursos["revenue"] = tf.keras.models.load_model(
+            ruta_h5, 
+            compile=False, 
+            safe_mode=False  # <--- ESTO ARREGLA EL ERROR DE DESERIALIZACIÓN
+        )
+        
+        print("✅ Todos los modelos v2 cargados exitosamente.")
+        return recursos, None
     except Exception as e:
+        print(f"❌ Error en carga: {str(e)}")
         return None, str(e)
 
-# Intentar carga global
+# Inicialización global
 MODELS, ERROR_MSG = cargar_recursos()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
-    # Re-intentar si falló al inicio
+    
+    # Reintento de carga si falló al arrancar
     if MODELS is None:
         MODELS, ERROR_MSG = cargar_recursos()
         if MODELS is None:
-            return jsonify({"error": f"Modelos no listos: {ERROR_MSG}"}), 500
+            return jsonify({"error": f"Error de Modelos: {ERROR_MSG}"}), 500
 
     try:
-        # Carga del CSV con manejo de errores
-        if not os.path.exists("REPORTE_MAESTRO_DEFINITIVO.csv"):
-            return jsonify({"error": "CSV no encontrado en el servidor"}), 500
-            
-        df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
+        # 1. Carga de Datos CSV
+        csv_path = os.path.join(os.path.dirname(__file__), "REPORTE_MAESTRO_DEFINITIVO.csv")
+        df = pd.read_csv(csv_path, sep=';', encoding='utf-16')
+        
+        # Limpieza de columnas numéricas
         for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
         
@@ -71,17 +72,24 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float(df['COSTO_TOTAL'].mean())
 
-        # Predicciones
+        # 2. Inferencia con Modelos
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
+        
+        # Modelo Asistencia
         prob_att = MODELS["asistencia"].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         
+        # Modelo Rentabilidad
         res_prof = MODELS["rentabilidad"].predict(test_df)[0]
+        
+        # Modelo Segmentación (usando valores planos para evitar warnings de nombres de columnas)
         res_seg = MODELS["segmentos"].predict(test_df.values)[0]
         
-        test_rev = np.array([[t_apuntados, avg_costo]])
-        pred_rev = float(MODELS["revenue"].predict(test_rev, verbose=0)[0][0])
+        # Modelo Revenue (Red Neuronal)
+        input_nn = np.array([[t_apuntados, avg_costo]], dtype=np.float32)
+        pred_rev = float(MODELS["revenue"].predict(input_nn, verbose=0)[0][0])
 
+        # 3. Respuesta Final
         return jsonify({
             "asistentes_reales": t_entran,
             "registrados": t_apuntados,
@@ -92,9 +100,11 @@ def get_dashboard():
             "perfil": "VIP" if res_seg == 1 else "Estandar",
             "revenue": f"${pred_rev:,.2f}"
         })
+
     except Exception as e:
-        return jsonify({"error": f"Error en Dashboard: {str(e)}"}), 500
+        return jsonify({"error": f"Error en procesamiento: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    # Render usa la variable de entorno PORT
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
