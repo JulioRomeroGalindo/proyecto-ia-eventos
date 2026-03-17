@@ -11,14 +11,11 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI ACTUALIZADA ---
-try:
-    genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
-    print("✅ API de Google Generative AI configurada")
-except Exception as e:
-    print(f"❌ Error en configuración inicial: {e}")
+# --- CONFIGURACIÓN DE GEMINI (FORZADO) ---
+# Usamos transport='rest' para evitar que la librería busque rutas v1beta
+genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo", transport='rest')
 
-# --- PARCHE PARA DENSE LAYER (MANTENIDO) ---
+# --- PARCHE PARA MODELO DE RED NEURONAL ---
 @keras.saving.register_keras_serializable()
 class CustomDense(keras.layers.Dense):
     def __init__(self, *args, **kwargs):
@@ -39,20 +36,21 @@ def cargar_recursos():
             custom_objects={"Dense": CustomDense},
             compile=False
         )
-        print("✅ Modelos de ML cargados con éxito.")
+        print("✅ Modelos cargados correctamente")
         return modelos, None
     except Exception as e:
-        print(f"❌ Error carga modelos: {e}")
+        print(f"❌ Error carga: {e}")
         return None, str(e)
 
 MODELS, ERROR_MSG = cargar_recursos()
 
+# --- RUTA DASHBOARD ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
     if MODELS is None:
         MODELS, ERROR_MSG = cargar_recursos()
-        if MODELS is None: return jsonify({"error": f"Error crítico: {ERROR_MSG}"}), 500
+        if MODELS is None: return jsonify({"error": str(ERROR_MSG)}), 500
 
     try:
         csv_path = os.path.join(os.path.dirname(__file__), "REPORTE_MAESTRO_DEFINITIVO.csv")
@@ -66,9 +64,6 @@ def get_dashboard():
         avg_costo = float((df['VALOR_TICKET'] + df['VALOR_CONSUMIBLE']).mean())
 
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
-        p_asistencia = int(t_apuntados * MODELS["asistencia"].predict_proba(test_df)[0][1])
-        res_prof = "Optima" if MODELS["rentabilidad"].predict(test_df)[0] == 1 else "Baja"
-        res_seg = "VIP" if MODELS["segmentos"].predict(test_df.values)[0] == 1 else "Estandar"
         
         input_nn = np.array([[t_apuntados, avg_costo]], dtype="float32")
         pred_rev = float(np.array(MODELS["revenue"](input_nn))[0][0])
@@ -77,52 +72,39 @@ def get_dashboard():
             "asistentes_reales": t_entran,
             "registrados": t_apuntados,
             "conversion": f"{(t_entran/t_apuntados*100):.2f}%" if t_apuntados > 0 else "0%",
-            "pred_asistencia": p_asistencia,
-            "rentabilidad": res_prof,
-            "perfil": res_seg,
+            "pred_asistencia": int(t_apuntados * MODELS["asistencia"].predict_proba(test_df)[0][1]),
+            "rentabilidad": "Optima" if MODELS["rentabilidad"].predict(test_df)[0] == 1 else "Baja",
+            "perfil": "VIP" if MODELS["segmentos"].predict(test_df.values)[0] == 1 else "Estandar",
             "revenue": f"${pred_rev:,.2f}",
             "ticket_promedio": avg_costo 
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- RUTA CHAT (EL CORAZÓN DEL PROBLEMA) ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     try:
         data_request = request.json
-        pregunta_usuario = data_request.get("pregunta")
+        pregunta = data_request.get("pregunta")
         contexto = data_request.get("contexto", {})
-        modelo_nombre = data_request.get("modelo", "gemini-1.5-flash")
 
-        # Asegurar formato correcto del nombre del modelo
-        if not modelo_nombre.startswith('models/'):
-            modelo_nombre = f"models/{modelo_nombre}"
+        # Usamos el alias '-latest' que es el más robusto contra errores 404
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
-        # Configuración del modelo con parámetros de generación
-        model = genai.GenerativeModel(
-            model_name=modelo_nombre,
-            generation_config={"temperature": 0.7, "top_p": 0.95, "max_output_tokens": 1024}
-        )
+        prompt = f"Actúa como consultor de eventos. Contexto técnico: {contexto}. Pregunta: {pregunta}"
 
-        prompt = f"""
-        Actúa como un Consultor Senior de Eventos con IA.
-        DATOS ACTUALES DEL EVENTO: {contexto}
-        PREGUNTA DEL CLIENTE: "{pregunta_usuario}"
-        INSTRUCCIÓN: Usa los datos para dar una respuesta estratégica.
-        """
-
+        # La configuración 'rest' en genai.configure hará que esto use la API v1 directamente
         response = model.generate_content(prompt)
         
         if response and response.text:
             return jsonify({"respuesta": response.text})
         else:
-            return jsonify({"respuesta": "El modelo no pudo generar una respuesta. Prueba con otro modelo."})
+            return jsonify({"respuesta": "El modelo no generó contenido. Intenta de nuevo."})
 
     except Exception as e:
-        print(f"❌ Error en Chat: {str(e)}")
-        return jsonify({
-            "respuesta": f"Lo siento, el modelo {modelo_nombre} no respondió. Detalles: {str(e)}"
-        }), 500
+        print(f"DEBUG ERROR: {str(e)}")
+        return jsonify({"respuesta": f"Fallo de conexión con Google AI: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
