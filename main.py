@@ -2,64 +2,53 @@ import os
 import pandas as pd
 import numpy as np
 import joblib
-import tensorflow as tf
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Configuración de CORS abierta para evitar el bloqueo en AI Studio
+# CORS ultra-abierto para evitar bloqueos en Google AI Studio
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- CARGA DE DATOS Y MODELOS ---
+# --- CARGA DE RECURSOS ---
 try:
-    # Carga del CSV
     master_df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
-    
-    # Carga de modelos (asegúrate de que estos archivos estén en tu repo de GitHub)
     m_attend = joblib.load('model_attendance.joblib')
-    # m_profit = joblib.load('model_profitability.joblib') # Opcional si lo usas luego
-    # m_nn = tf.keras.models.load_model('model_revenue.h5', compile=False) # Opcional
-    
-    print("✅ Recursos cargados exitosamente")
+    print("✅ Conexión con CSV y Modelos establecida")
 except Exception as e:
-    print(f"❌ Error al cargar archivos: {e}")
-    # Creamos un DF vacío por si falla la carga para que el server no crashee
+    print(f"❌ Error crítico de carga: {e}")
     master_df = pd.DataFrame()
-
-@app.route('/')
-def health_check():
-    return jsonify({"status": "online", "message": "Servidor de Eventos listo"})
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard_kpis():
     try:
-        # Cálculos de lógica de negocio
-        total_entran = int(master_df['ENTRAN'].sum())
-        total_apuntados = int(master_df['APUNTADOS'].sum())
-        conversion_rate = (total_entran / total_apuntados * 100) if total_apuntados > 0 else 0
+        # Limpieza de datos: Convertir a número y llenar vacíos con 0
+        df = master_df.copy()
+        df['ENTRAN'] = pd.to_numeric(df['ENTRAN'], errors='coerce').fillna(0)
+        df['APUNTADOS'] = pd.to_numeric(df['APUNTADOS'], errors='coerce').fillna(0)
+        df['VALOR_TICKET'] = pd.to_numeric(df['VALOR_TICKET'], errors='coerce').fillna(0)
         
-        # Predicción base usando el promedio de apuntados para el dashboard inicial
-        avg_apuntados = master_df['APUNTADOS'].mean()
-        pred_base = m_attend.predict(np.array([[avg_apuntados]]))[0]
+        total_entran = int(df['ENTRAN'].sum())
+        total_apuntados = int(df['APUNTADOS'].sum())
+        
+        # PREDICCIÓN REAL: Usamos el total de registrados actuales como entrada al modelo
+        # El modelo Random Forest espera [[valor]]
+        if not m_attend:
+            pred_val = total_entran # Fallback si el modelo no carga
+        else:
+            pred_val = m_attend.predict(np.array([[total_apuntados]]))[0]
+        
+        # Lógica de cordura: La predicción no puede ser menor a los que ya entraron
+        asistencia_final = max(int(pred_val), total_entran)
+        
+        tasa = (total_entran / total_apuntados * 100) if total_apuntados > 0 else 0
 
-        # IMPORTANTE: Estos nombres de llaves coinciden con tu Dashboard de AI Studio
         return jsonify({
             "total_invitados": total_entran,
-            "tasa_conversion": f"{conversion_rate:.2f}%",
-            "prediccion_asistencia": int(pred_base),
             "total_registrados": total_apuntados,
-            "ticket_promedio": int(master_df['VALOR_TICKET'].mean())
+            "tasa_conversion": f"{tasa:.2f}%",
+            "prediccion_asistencia": asistencia_final,
+            "ticket_promedio": int(df['VALOR_TICKET'].mean())
         })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/v1/predict/attendance', methods=['POST'])
-def pred_attend():
-    try:
-        data = request.json
-        apuntados = data.get('apuntados', 100) # valor por defecto
-        prediction = m_attend.predict(np.array([[apuntados]]))
-        return jsonify({"asistencia_estimada": int(prediction[0])})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
