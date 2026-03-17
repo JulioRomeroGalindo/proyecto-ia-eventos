@@ -13,7 +13,7 @@ CORS(app)
 
 # --- CONFIGURACIÓN DE GEMINI ---
 # Reemplaza con la llave que obtuviste en Google AI Studio
-genai.configure(api_key="TU_API_KEY_AQUÍ")
+genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- PARCHE DE EMERGENCIA PARA DENSE LAYER (MANTENIDO) ---
