@@ -4,57 +4,24 @@ import numpy as np
 import joblib
 import tensorflow as tf
 import keras
-import google.generativeai as genai  # <--- NUEVO
+import google.generativeai as genai
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI CORREGIDA ---
+# --- CONFIGURACIÓN DE GEMINI ---
 try:
+    # Tu API Key detectada
     genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
-    # Forzamos el uso de gemini-1.5-flash-latest que es la versión más estable
+    # Modelo estable
     gemini_model = genai.GenerativeModel('gemini-1.5-flash') 
     print("✅ Configuración de Gemini preparada")
 except Exception as e:
     print(f"❌ Error configurando Gemini: {e}")
 
-# --- RUTA CHATBOT ACTUALIZADA ---
-@app.route('/api/v1/chat', methods=['POST'])
-def chat_interactivo():
-    try:
-        data_request = request.json
-        pregunta_usuario = data_request.get("pregunta")
-        contexto_modelos = data_request.get("contexto", {})
-
-        prompt = f"""
-        Actúa como un Consultor Senior de Eventos.
-        DATOS DE MIS MODELOS DE IA:
-        - Registrados: {contexto_modelos.get('registrados')}
-        - Asistencia Predicha: {contexto_modelos.get('pred_asistencia')}
-        - Perfil: {contexto_modelos.get('perfil')}
-        - Ingresos: {contexto_modelos.get('revenue')}
-        
-        PREGUNTA: "{pregunta_usuario}"
-        
-        Instrucción: Usa los datos para dar una respuesta técnica y estratégica.
-        """
-
-        # Añadimos un manejo de error específico aquí para ver qué pasa
-        response = gemini_model.generate_content(prompt)
-        
-        if response and response.text:
-            return jsonify({"respuesta": response.text})
-        else:
-            return jsonify({"respuesta": "La IA no pudo generar una respuesta clara."})
-    
-    except Exception as e:
-        # Si sale el error 404 de nuevo, imprimimos el detalle en la consola de Render
-        print(f"DEBUG ERROR CHAT: {str(e)}")
-        return jsonify({"respuesta": f"Error de conexión con el modelo: {str(e)}"}), 500
-
-# --- PARCHE DE EMERGENCIA PARA DENSE LAYER (MANTENIDO) ---
+# --- PARCHE DE EMERGENCIA PARA DENSE LAYER ---
 @keras.saving.register_keras_serializable()
 class CustomDense(keras.layers.Dense):
     def __init__(self, *args, **kwargs):
@@ -65,10 +32,12 @@ def cargar_recursos():
     base_path = os.path.dirname(os.path.abspath(__file__))
     modelos = {}
     try:
+        # Carga de modelos Scikit-Learn
         modelos["asistencia"] = joblib.load(os.path.join(base_path, "model_attendance_v2.joblib"))
         modelos["rentabilidad"] = joblib.load(os.path.join(base_path, "model_profitability_v2.joblib"))
         modelos["segmentos"] = joblib.load(os.path.join(base_path, "model_segments_v2.joblib"))
         
+        # Carga de Red Neuronal con parche aplicado
         ruta_h5 = os.path.join(base_path, "model_revenue_v2.h5")
         modelos["revenue"] = keras.models.load_model(
             ruta_h5, 
@@ -83,7 +52,7 @@ def cargar_recursos():
 
 MODELS, ERROR_MSG = cargar_recursos()
 
-# --- RUTA DASHBOARD (MANTENIDA EXACTAMENTE IGUAL) ---
+# --- RUTA 1: DASHBOARD (AUDITORÍA) ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
@@ -118,12 +87,12 @@ def get_dashboard():
             "rentabilidad": res_prof,
             "perfil": res_seg,
             "revenue": f"${pred_rev:,.2f}",
-            "ticket_promedio": avg_costo # Útil para que la IA haga cálculos
+            "ticket_promedio": avg_costo 
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- NUEVA RUTA: CHATBOT INTERACTIVO ---
+# --- RUTA 2: CHATBOT INTERACTIVO (ÚNICA INSTANCIA) ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     try:
@@ -131,29 +100,31 @@ def chat_interactivo():
         pregunta_usuario = data_request.get("pregunta")
         contexto_modelos = data_request.get("contexto", {})
 
-        # Construcción del prompt estratégico
         prompt = f"""
         Actúa como un Consultor Estratégico de Eventos con IA.
-        DATOS ACTUALES DEL EVENTO (Extraídos de modelos de ML):
-        - Registrados: {contexto_modelos.get('registrados')}
-        - Predicción Asistencia: {contexto_modelos.get('pred_asistencia')}
+        DATOS DE MODELOS DE MACHINE LEARNING:
+        - Registrados actual: {contexto_modelos.get('registrados')}
+        - Asistencia Predicha: {contexto_modelos.get('pred_asistencia')}
         - Perfil: {contexto_modelos.get('perfil')}
-        - Ingresos Estimados: {contexto_modelos.get('revenue')}
+        - Ingresos: {contexto_modelos.get('revenue')}
         - Ticket Promedio: {contexto_modelos.get('ticket_promedio')}
 
-        PREGUNTA DEL CLIENTE: "{pregunta_usuario}"
+        PREGUNTA DEL USUARIO: "{pregunta_usuario}"
 
-        TAREA: 
-        Responde a la pregunta. Si el cliente propone cambios (como subir a 5000 personas), 
-        usa los datos de arriba para hacer una estimación rápida y profesional. 
-        Sé conciso y da consejos de valor (logística, marketing o finanzas).
+        INSTRUCCIÓN: Responde usando los datos técnicos. Si proponen cambios (ej. 5000 personas), 
+        proyecta resultados basados en la tasa de conversión y ticket promedio actual.
         """
 
         response = gemini_model.generate_content(prompt)
-        return jsonify({"respuesta": response.text})
+        
+        if response and response.text:
+            return jsonify({"respuesta": response.text})
+        else:
+            return jsonify({"respuesta": "La IA procesó la duda pero no generó texto. Intenta de nuevo."})
     
     except Exception as e:
         return jsonify({"respuesta": f"Error en el cerebro de IA: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
