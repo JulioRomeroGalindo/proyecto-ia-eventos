@@ -3,13 +3,14 @@ import pandas as pd
 import numpy as np
 import joblib
 import tensorflow as tf
-import keras  # Importamos keras directamente
+import keras  # Usamos Keras 3 directamente
 from flask import Flask, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
+# --- SISTEMA DE CARGA NATIVO KERAS 3 ---
 def cargar_recursos():
     base_path = os.path.dirname(os.path.abspath(__file__))
     nombres = {
@@ -18,35 +19,40 @@ def cargar_recursos():
         "segmentos": "model_segments_v2.joblib",
         "revenue": "model_revenue_v2.h5"
     }
+    
     recursos = {}
     
     try:
-        # Carga de Scikit-Learn
+        # 1. Cargar modelos de Scikit-Learn
         recursos["asistencia"] = joblib.load(os.path.join(base_path, nombres["asistencia"]))
         recursos["rentabilidad"] = joblib.load(os.path.join(base_path, nombres["rentabilidad"]))
         recursos["segmentos"] = joblib.load(os.path.join(base_path, nombres["segmentos"]))
         
-        # SOLUCIÓN DEFINITIVA: Usar el cargador nativo de Keras 3
+        # 2. Cargar Red Neuronal usando el motor nativo de Keras 3
+        # Esto evita que TensorFlow intente validar campos que no conoce
         ruta_h5 = os.path.join(base_path, nombres["revenue"])
         recursos["revenue"] = keras.models.load_model(ruta_h5, compile=False)
         
-        print("✅ Modelos cargados con el motor nativo de Keras 3")
+        print("✅ EXITOSO: Motor Keras 3 activado y modelos cargados.")
         return recursos, None
     except Exception as e:
-        print(f"❌ Error en carga: {str(e)}")
+        print(f"❌ ERROR EN CARGA: {str(e)}")
         return None, str(e)
 
+# Inicializar modelos al arrancar
 MODELS, ERROR_MSG = cargar_recursos()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
+    
     if MODELS is None:
         MODELS, ERROR_MSG = cargar_recursos()
         if MODELS is None:
             return jsonify({"error": f"Modelos no listos: {ERROR_MSG}"}), 500
 
     try:
+        # --- CARGA Y LIMPIEZA DE DATOS ---
         csv_path = os.path.join(os.path.dirname(__file__), "REPORTE_MAESTRO_DEFINITIVO.csv")
         df = pd.read_csv(csv_path, sep=';', encoding='utf-16')
         
@@ -59,17 +65,20 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float(df['COSTO_TOTAL'].mean())
 
+        # --- INFERENCIA ---
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
         
-        # Inferencia
+        # Scikit-Learn predictions
         prob_att = MODELS["asistencia"].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         res_prof = MODELS["rentabilidad"].predict(test_df)[0]
         res_seg = MODELS["segmentos"].predict(test_df.values)[0]
         
-        # Predicción Revenue con input formateado para Keras 3
+        # Red Neuronal prediction (Keras 3 syntax)
         input_nn = np.array([[t_apuntados, avg_costo]], dtype="float32")
-        pred_rev = float(MODELS["revenue"](input_nn, training=False).numpy()[0][0])
+        # Llamamos al modelo directamente para máxima compatibilidad
+        pred_raw = MODELS["revenue"](input_nn, training=False)
+        pred_rev = float(np.array(pred_raw)[0][0])
 
         return jsonify({
             "asistentes_reales": t_entran,
@@ -83,7 +92,7 @@ def get_dashboard():
         })
 
     except Exception as e:
-        return jsonify({"error": f"Error en ejecución: {str(e)}"}), 500
+        return jsonify({"error": f"Error en Dashboard: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
