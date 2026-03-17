@@ -2,110 +2,132 @@ import os
 import pandas as pd
 import numpy as np
 import joblib
-import tensorflow as tf
-import keras
-import requests  # Usamos peticiones directas para evitar el error 404 v1beta
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import google.generativeai as genai
+from tensorflow.keras.models import load_model
 
 app = Flask(__name__)
-CORS(app)
+# Habilitamos CORS para permitir peticiones desde tu App en AI Studio
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- SEGURIDAD: LEEMOS LA LLAVE DESDE RENDER ---
-api_key = os.environ.get("GEMINI_API_KEY")
+# --- CONFIGURACIÓN DE SEGURIDAD Y IA ---
+# Leemos la API Key desde las variables de entorno de Render
+API_KEY = os.environ.get('GEMINI_API_KEY')
 
-# --- PARCHE PARA MODELO DE RED NEURONAL (MANTENIDO) ---
-@keras.saving.register_keras_serializable()
-class CustomDense(keras.layers.Dense):
-    def __init__(self, *args, **kwargs):
-        kwargs.pop('quantization_config', None)
-        super().__init__(*args, **kwargs)
+if API_KEY:
+    # IMPORTANTE: transport='rest' evita errores de gRPC/v1beta en entornos restringidos
+    genai.configure(api_key=API_KEY, transport='rest')
+else:
+    print("⚠️ ADVERTENCIA: La variable GEMINI_API_KEY no está configurada en Render.")
 
-def cargar_recursos():
-    base_path = os.path.dirname(os.path.abspath(__file__))
-    modelos = {}
-    try:
-        modelos["asistencia"] = joblib.load(os.path.join(base_path, "model_attendance_v2.joblib"))
-        modelos["rentabilidad"] = joblib.load(os.path.join(base_path, "model_profitability_v2.joblib"))
-        modelos["segmentos"] = joblib.load(os.path.join(base_path, "model_segments_v2.joblib"))
-        ruta_h5 = os.path.join(base_path, "model_revenue_v2.h5")
-        modelos["revenue"] = keras.models.load_model(ruta_h5, custom_objects={"Dense": CustomDense}, compile=False)
-        print("✅ Modelos de ML y Red Neuronal cargados correctamente")
-        return modelos, None
-    except Exception as e:
-        print(f"❌ Error carga recursos: {e}")
-        return None, str(e)
+# --- CARGA DE MODELOS DE MACHINE LEARNING ---
+# Cargamos los modelos al inicio para que las respuestas sean instantáneas
+try:
+    model_attendance = joblib.load('model_attendance_v2.joblib')
+    model_profitability = joblib.load('model_profitability_v2.joblib')
+    model_segments = joblib.load('model_segments_v2.joblib')
+    model_revenue = load_model('model_revenue_v2.h5')
+    print("✅ Modelos v2 cargados exitosamente.")
+except Exception as e:
+    print(f"❌ Error al cargar modelos: {str(e)}")
 
-MODELS, ERROR_MSG = cargar_recursos()
-
-# --- RUTA 1: DASHBOARD (KPIs ORIGINALES) ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
-def get_dashboard():
-    if MODELS is None: return jsonify({"error": "Modelos no cargados"}), 500
+def get_dashboard_kpis():
     try:
-        csv_path = os.path.join(os.path.dirname(__file__), "REPORTE_MAESTRO_DEFINITIVO.csv")
-        df = pd.read_csv(csv_path, sep=';', encoding='utf-16')
+        # Lectura del CSV con los parámetros específicos solicitados
+        df = pd.read_csv('REPORTE_MAESTRO_DEFINITIVO.csv', sep=';', encoding='utf-16')
         
-        for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
+        # Procesamiento y limpieza de columnas
+        entran = pd.to_numeric(df['ENTRAN'], errors='coerce').fillna(0).sum()
+        apuntados = pd.to_numeric(df['APUNTADOS'], errors='coerce').fillna(0).sum()
+        ticket_prom = pd.to_numeric(df['VALOR_TICKET'], errors='coerce').fillna(0).mean()
+        consumo_prom = pd.to_numeric(df['VALOR_CONSUMIBLE'], errors='coerce').fillna(0).mean()
         
-        t_apuntados = int(df['APUNTADOS'].sum())
-        t_entran = int(df['ENTRAN'].sum())
-        avg_costo = float((df['VALOR_TICKET'] + df['VALOR_CONSUMIBLE']).mean())
+        # Preparación de datos para los modelos
+        # Asumimos que los modelos esperan el número de registrados como entrada principal
+        input_data = np.array([[apuntados]])
         
-        test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
+        # Ejecución de Inferencia
+        pred_asistencia = int(model_attendance.predict(input_data)[0])
+        pred_rentabilidad = str(model_profitability.predict(input_data)[0])
+        pred_segmento = str(model_segments.predict(input_data)[0])
         
-        # Predicción Revenue (Red Neuronal)
-        input_nn = np.array([[t_apuntados, avg_costo]], dtype="float32")
-        pred_rev = float(np.array(MODELS["revenue"](input_nn))[0][0])
+        # Predicción de Revenue (Modelo Keras .h5)
+        pred_revenue_raw = model_revenue.predict(input_data)
+        pred_revenue = float(pred_revenue_raw[0][0])
+        
+        # Cálculo de Tasa de Conversión
+        tasa_conv = (entran / apuntados * 100) if apuntados > 0 else 0
         
         return jsonify({
-            "asistentes_reales": t_entran,
-            "registrados": t_apuntados,
-            "conversion": f"{(t_entran/t_apuntados*100):.2f}%" if t_apuntados > 0 else "0%",
-            "pred_asistencia": int(t_apuntados * MODELS["asistencia"].predict_proba(test_df)[0][1]),
-            "rentabilidad": "Optima" if MODELS["rentabilidad"].predict(test_df)[0] == 1 else "Baja",
-            "perfil": "VIP" if MODELS["segmentos"].predict(test_df.values)[0] == 1 else "Estandar",
-            "revenue": f"${pred_rev:,.2f}",
-            "ticket_promedio": avg_costo 
+            "asistentes_reales": int(entran),
+            "registrados": int(apuntados),
+            "conversion": f"{tasa_conv:.2f}%",
+            "pred_asistencia": pred_asistencia,
+            "ticket_promedio": round(float(ticket_prom), 2),
+            "rentabilidad": pred_rentabilidad,
+            "perfil": pred_segmento,
+            "revenue": f"${pred_revenue:,.2f}"
         })
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Fallo en Dashboard: {str(e)}"}), 500
 
 @app.route('/api/v1/chat', methods=['POST'])
-def chat_interactivo():
-    if not api_key:
-        return jsonify({"respuesta": "Error: GEMINI_API_KEY no configurada"}), 500
-        
+def chat_consultant():
     try:
-        data = request.json
-        pregunta = data.get("pregunta", "")
-        contexto = str(data.get("contexto", ""))
+        payload = request.json
+        pregunta = payload.get('pregunta')
+        contexto = payload.get('contexto', {})
+        # Permitimos que el frontend elija el modelo, pero por defecto usamos flash
+        modelo_ia = payload.get('modelo', 'gemini-1.5-flash')
 
-        # URL CON EL PREFIJO 'models/' (ESTO QUITA EL ERROR 404 DE LA V1)
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+        if not pregunta:
+            return jsonify({"error": "No se recibió ninguna pregunta"}), 400
+
+        # Configuración del modelo Generativo
+        model = genai.GenerativeModel(modelo_ia)
         
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{
-                "parts": [{"text": f"Contexto: {contexto}\nPregunta: {pregunta}"}]
-            }]
-        }
-
-        response = requests.post(url, json=payload, headers=headers)
-        res_data = response.json()
-
-        if response.status_code == 200:
-            texto_ia = res_data['candidates'][0]['content']['parts'][0]['text']
-            return jsonify({"respuesta": texto_ia})
-        else:
-            # Si vuelve a fallar, este mensaje nos dirá el modelo exacto que Google SÍ permite
-            error_info = res_data.get('error', {}).get('message', 'Error desconocido')
-            return jsonify({"respuesta": f"Google dice: {error_info}"}), response.status_code
+        prompt_ingenieria = f"""
+        Eres un Consultor Estratégico de Eventos de alto nivel. 
+        Analiza los siguientes datos reales del evento y responde la duda del usuario.
+        
+        DATOS ACTUALES DEL EVENTO:
+        - Asistentes en Sala: {contexto.get('asistentes_reales', 'N/A')}
+        - Registrados Totales: {contexto.get('registrados', 'N/A')}
+        - Predicción de Asistencia Final (ML): {contexto.get('pred_asistencia', 'N/A')}
+        - Nivel de Rentabilidad: {contexto.get('rentabilidad', 'N/A')}
+        - Perfil de Audiencia Detectado: {contexto.get('perfil', 'N/A')}
+        - Ingresos Proyectados (NN): {contexto.get('revenue', 'N/A')}
+        
+        PREGUNTA DEL USUARIO:
+        {pregunta}
+        
+        INSTRUCCIONES:
+        1. Responde de forma ejecutiva y basada en datos.
+        2. Si la predicción es menor a los registrados, sugiere estrategias de asistencia.
+        3. Si la rentabilidad es baja, propón ajustes en el ticket o consumibles.
+        """
+        
+        response = model.generate_content(prompt_ingenieria)
+        
+        return jsonify({
+            "respuesta": response.text,
+            "modelo_usado": modelo_ia
+        })
 
     except Exception as e:
-        return jsonify({"respuesta": f"Error: {str(e)}"}), 500
-        
+        print(f"❌ Error en Chatbot: {str(e)}")
+        # Fallback automático a gemini-pro si falla el modelo solicitado
+        try:
+            model_alt = genai.GenerativeModel('gemini-pro')
+            response_alt = model_alt.generate_content(prompt_ingenieria)
+            return jsonify({"respuesta": response_alt.text, "modelo_usado": "gemini-pro (fallback)"})
+        except:
+            return jsonify({"error": "El servicio de IA no está disponible temporalmente."}), 500
+
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
+    # Render requiere que escuchemos en el puerto dinámico de la variable PORT
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
