@@ -2,71 +2,79 @@ import os
 import pandas as pd
 import numpy as np
 import joblib
+import tensorflow as tf
 from flask import Flask, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
-# --- CARGA DE RECURSOS CON LIMPIEZA ---
-def cargar_y_limpiar():
+# --- CARGA DE MODELOS V2 ---
+try:
+    # Usamos los nombres exactos de tus nuevos archivos
+    m_attend = joblib.load('model_attendance_v2.joblib')
+    m_profit = joblib.load('model_profitability_v2.joblib')
+    m_segments = joblib.load('model_segments_v2.joblib')
+    m_revenue = tf.keras.models.load_model('model_revenue_v2.h5', compile=False)
+    print("✅ Los 4 modelos V2 cargados exitosamente")
+except Exception as e:
+    print(f"❌ Error cargando modelos: {e}")
+
+def get_clean_data():
     try:
-        # Intentamos leer con separador punto y coma (común en Excel español)
         df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
-        
-        # LIMPIEZA CRÍTICA: Convertir columnas a números, eliminando espacios o basura
-        for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET']:
+        for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             if col in df.columns:
-                # Quitamos puntos de miles, cambiamos comas decimales por puntos, y convertimos
-                df[col] = df[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
+        
+        # Regra de negocio unificada
+        df['COSTO_TOTAL'] = df['VALOR_TICKET'] + df['VALOR_CONSUMIBLE']
         return df
-    except Exception as e:
-        print(f"Error cargando CSV: {e}")
+    except:
         return pd.DataFrame()
 
-# Cargar modelo
-try:
-    m_attend = joblib.load('model_attendance.joblib')
-except:
-    m_attend = None
-
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
-def get_dashboard_kpis():
+def get_dashboard():
     try:
-        df = cargar_y_limpiar()
-        if df.empty:
-            return jsonify({"error": "CSV vacío o no encontrado"}), 500
+        df = get_clean_data()
+        t_apuntados = int(df['APUNTADOS'].sum())
+        t_entran = int(df['ENTRAN'].sum())
+        avg_costo = df['COSTO_TOTAL'].mean()
 
-        total_entran = int(df['ENTRAN'].sum())
-        total_apuntados = int(df['APUNTADOS'].sum())
+        # --- PREDICCIONES CON MODELOS V2 ---
         
-        # --- LÓGICA DE PREDICCIÓN CORREGIDA ---
-        if m_attend is not None:
-            # Usamos el total de registrados como entrada
-            input_data = np.array([[total_apuntados]])
-            pred_val = m_attend.predict(input_data)[0]
-            
-            # Si el modelo devuelve algo menor a los que ya entraron, 
-            # lo ajustamos para que tenga sentido lógico.
-            asistencia_final = max(int(pred_val), total_entran)
-            
-            # Si a pesar de todo el modelo devuelve 0 pero hay gente apuntada,
-            # aplicamos una regla de negocio simple para no mostrar 0.
-            if asistencia_final == 0 and total_apuntados > 0:
-                asistencia_final = int(total_apuntados * 0.85) # Estimación lógica
-        else:
-            asistencia_final = total_entran
+        # 1. Asistencia (Probabilidad escalada)
+        # El modelo v2 devuelve probabilidad, multiplicamos por registrados
+        test_att = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
+        prob_att = m_attend.predict_proba(test_att)[0][1]
+        pred_asistencia = int(t_apuntados * prob_att)
 
-        tasa = (total_entran / total_apuntados * 100) if total_apuntados > 0 else 0
+        # 2. Rentabilidad
+        test_prof = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
+        res_prof = m_profit.predict(test_prof)[0]
+        label_rentabilidad = "Óptima" if res_prof == 1 else "Baja"
+
+        # 3. Segmentación
+        # Quitamos nombres de columna con .values para evitar warnings
+        res_seg = m_segments.predict(np.array([[avg_costo]]))[0]
+        nombres_segmentos = {0: "Estándar", 1: "VIP / Premium", 2: "Base / Masivo"}
+        label_segmento = nombres_segmentos.get(res_seg, "Diversificado")
+
+        # 4. Revenue (Red Neuronal)
+        test_rev = np.array([[t_apuntados, avg_costo]])
+        pred_rev = float(m_revenue.predict(test_rev, verbose=0)[0][0])
 
         return jsonify({
-            "total_invitados": total_entran,
-            "total_registrados": total_apuntados,
-            "tasa_conversion": f"{tasa:.2f}%",
-            "prediccion_asistencia": asistencia_final,
-            "ticket_promedio": int(df['VALOR_TICKET'].mean() if 'VALOR_TICKET' in df else 0)
+            "total_invitados": t_entran,
+            "total_registrados": t_apuntados,
+            "tasa_conversion": f"{(t_entran/t_apuntados*100):.2f}%" if t_apuntados > 0 else "0%",
+            "prediccion_asistencia": pred_asistencia,
+            "ticket_promedio": int(avg_costo),
+            "rentabilidad": label_rentabilidad,
+            "perfil_evento": label_segmento,
+            "revenue_estimado": f"${pred_rev:,.2f}"
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
