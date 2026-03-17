@@ -4,22 +4,15 @@ import numpy as np
 import joblib
 import tensorflow as tf
 import keras
-import google.generativeai as genai
+import requests  # Importante: para la comunicación directa
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI (CON FIX DE RUTA) ---
+# --- SEGURIDAD: LEEMOS LA LLAVE DESDE RENDER ---
 api_key = os.environ.get("GEMINI_API_KEY")
-
-if api_key:
-    # transport='rest' obliga a usar la ruta v1 estable y evita la v1beta que falla
-    genai.configure(api_key=api_key, transport='rest')
-    print("✅ API Gemini configurada correctamente")
-else:
-    print("❌ ERROR: No se encontró GEMINI_API_KEY en Environment")
 
 # --- PARCHE PARA MODELOS ML (MANTENIDO) ---
 @keras.saving.register_keras_serializable()
@@ -37,7 +30,7 @@ def cargar_recursos():
         modelos["segmentos"] = joblib.load(os.path.join(base_path, "model_segments_v2.joblib"))
         ruta_h5 = os.path.join(base_path, "model_revenue_v2.h5")
         modelos["revenue"] = keras.models.load_model(ruta_h5, custom_objects={"Dense": CustomDense}, compile=False)
-        print("✅ Modelos de ML cargados")
+        print("✅ Modelos de ML cargados con éxito")
         return modelos, None
     except Exception as e:
         print(f"❌ Error carga ML: {e}")
@@ -45,7 +38,7 @@ def cargar_recursos():
 
 MODELS, ERROR_MSG = cargar_recursos()
 
-# --- RUTA 1: DASHBOARD (KPIs MANTENIDOS) ---
+# --- RUTA 1: DASHBOARD (KPIs INTACTOS) ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     if MODELS is None: return jsonify({"error": "Modelos no cargados"}), 500
@@ -60,6 +53,9 @@ def get_dashboard():
         avg_costo = float((df['VALOR_TICKET'] + df['VALOR_CONSUMIBLE']).mean())
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
         
+        input_nn = np.array([[t_apuntados, avg_costo]], dtype="float32")
+        pred_rev = float(np.array(MODELS["revenue"](input_nn))[0][0])
+        
         return jsonify({
             "asistentes_reales": t_entran,
             "registrados": t_apuntados,
@@ -67,27 +63,46 @@ def get_dashboard():
             "pred_asistencia": int(t_apuntados * MODELS["asistencia"].predict_proba(test_df)[0][1]),
             "rentabilidad": "Optima" if MODELS["rentabilidad"].predict(test_df)[0] == 1 else "Baja",
             "perfil": "VIP" if MODELS["segmentos"].predict(test_df.values)[0] == 1 else "Estandar",
-            "revenue": f"${float(np.array(MODELS['revenue'](np.array([[t_apuntados, avg_costo]], dtype='float32')))[0][0]):,.2f}",
+            "revenue": f"${pred_rev:,.2f}",
             "ticket_promedio": avg_costo 
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- RUTA 2: CHAT (CORREGIDO) ---
+# --- RUTA 2: CHAT (SOLUCIÓN DE FUERZA BRUTA SIN LIBRERÍA GEMINI) ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
+    if not api_key:
+        return jsonify({"respuesta": "Error: GEMINI_API_KEY no configurada en Render"}), 500
+        
     try:
         data = request.json
-        # 'gemini-1.5-flash' es el nombre más compatible con la ruta v1
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        pregunta = data.get("pregunta")
+        contexto = data.get("contexto", "")
+
+        # LLAMADA DIRECTA A LA API V1 (SALTAMOS EL ERROR 404 V1BETA)
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
         
-        prompt = f"Actúa como consultor experto. Contexto: {data.get('contexto')}. Pregunta: {data.get('pregunta')}"
-        response = model.generate_content(prompt)
-        
-        return jsonify({"respuesta": response.text})
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": f"Actúa como consultor experto en eventos. Contexto técnico: {contexto}. Pregunta: {pregunta}"}]
+            }]
+        }
+
+        response = requests.post(url, json=payload, headers=headers)
+        res_data = response.json()
+
+        if response.status_code == 200:
+            texto_ia = res_data['candidates'][0]['content']['parts'][0]['text']
+            return jsonify({"respuesta": texto_ia})
+        else:
+            error_msg = res_data.get('error', {}).get('message', 'Error desconocido de Google')
+            return jsonify({"respuesta": f"Error de Google AI: {error_msg}"}), response.status_code
+
     except Exception as e:
-        # Si esto falla, nos dirá exactamente por qué (región, llave o versión)
-        return jsonify({"respuesta": f"Error de conexión: {str(e)}"}), 500
+        return jsonify({"respuesta": f"Fallo crítico de conexión: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
