@@ -13,7 +13,7 @@ CORS(app)
 
 # --- CONFIGURACIÓN DE GEMINI CORREGIDA ---
 try:
-    genai.configure(api_key="TU_API_KEY_AQUÍ")
+    genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
     # Forzamos el uso de gemini-1.5-flash-latest que es la versión más estable
     gemini_model = genai.GenerativeModel('gemini-1.5-flash') 
     print("✅ Configuración de Gemini preparada")
