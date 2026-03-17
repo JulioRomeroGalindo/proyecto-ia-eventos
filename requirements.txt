@@ -7,4 +7,4 @@ scikit-learn
 tensorflow-cpu==2.16.1
 keras==3.3.3
 gunicorn
-google-generativeai
+google-generativeai==0.3.1
