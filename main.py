@@ -9,44 +9,41 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- RASTREADOR DE MODELOS ---
-def load_models():
-    # Nombres exactos que deben estar en GitHub
-    files = {
-        "attend": "model_attendance_v2.joblib",
-        "profit": "model_profitability_v2.joblib",
-        "segments": "model_segments_v2.joblib",
+# --- CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def cargar_modelos():
+    modelos = {}
+    nombres = {
+        "asistencia": "model_attendance_v2.joblib",
+        "rentabilidad": "model_profitability_v2.joblib",
+        "segmentos": "model_segments_v2.joblib",
         "revenue": "model_revenue_v2.h5"
     }
     
-    loaded = {}
-    for key, name in files.items():
-        if os.path.exists(name):
-            try:
-                if name.endswith('.h5'):
-                    loaded[key] = tf.keras.models.load_model(name, compile=False)
-                else:
-                    loaded[key] = joblib.load(name)
-                print(f"✅ Cargado: {name}")
-            except Exception as e:
-                print(f"❌ Error cargando {name}: {e}")
-                loaded[key] = None
-        else:
-            print(f"⚠️ Archivo NO ENCONTRADO: {name}")
-            loaded[key] = None
-    return loaded
+    try:
+        modelos["asistencia"] = joblib.load(os.path.join(BASE_DIR, nombres["asistencia"]))
+        modelos["rentabilidad"] = joblib.load(os.path.join(BASE_DIR, nombres["rentabilidad"]))
+        modelos["segmentos"] = joblib.load(os.path.join(BASE_DIR, nombres["segmentos"]))
+        modelos["revenue"] = tf.keras.models.load_model(os.path.join(BASE_DIR, nombres["revenue"]), compile=False)
+        print("✅ TODOS LOS MODELOS CARGADOS DESDE:", BASE_DIR)
+        return modelos
+    except Exception as e:
+        print(f"❌ ERROR CARGANDO MODELOS: {e}")
+        # Esto imprimirá en Render qué archivos SI existen para comparar
+        print("Archivos detectados:", os.listdir(BASE_DIR))
+        return None
 
-models = load_models()
+# Intentar cargar al iniciar
+MODELS = cargar_modelos()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     try:
-        # 1. Verificar si todos los modelos están presentes
-        if None in models.values():
-            missing = [k for k, v in models.items() if v is None]
-            return jsonify({"error": f"Modelos faltantes en el servidor: {missing}"}), 500
+        if MODELS is None:
+            return jsonify({"error": "Los modelos no están listos en el servidor"}), 500
 
-        # 2. Leer CSV
+        # Lectura de datos
         df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
         for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
@@ -57,20 +54,20 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float(df['COSTO_TOTAL'].mean())
 
-        # 3. Predicciones
+        # Predicciones
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
         
-        # Asistencia
-        prob_att = models['attend'].predict_proba(test_df)[0][1]
+        # 1. Asistencia
+        prob_att = MODELS["asistencia"].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         
-        # Rentabilidad y Segmentos
-        res_prof = models['profit'].predict(test_df)[0]
-        res_seg = models['segments'].predict(test_df.values)[0]
+        # 2. Rentabilidad y Segmentos
+        res_prof = MODELS["rentabilidad"].predict(test_df)[0]
+        res_seg = MODELS["segmentos"].predict(test_df.values)[0]
         
-        # Revenue
+        # 3. Revenue
         test_rev = np.array([[t_apuntados, avg_costo]])
-        pred_rev = float(models['revenue'].predict(test_rev, verbose=0)[0][0])
+        pred_rev = float(MODELS["revenue"].predict(test_rev, verbose=0)[0][0])
 
         return jsonify({
             "asistentes_reales": t_entran,
@@ -83,7 +80,8 @@ def get_dashboard():
             "revenue": f"${pred_rev:,.2f}"
         })
     except Exception as e:
-        return jsonify({"error": f"Error en procesamiento: {str(e)}"}), 500
+        return jsonify({"error": f"Fallo en proceso: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
