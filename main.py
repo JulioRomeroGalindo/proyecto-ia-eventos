@@ -11,17 +11,9 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI (VERSIÓN CORREGIDA) ---
-try:
-    # Usamos tu clave detectada
-    genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
-    
-    # IMPORTANTE: No usamos 'models/' al inicio, solo el nombre
-    # Si gemini-1.5-flash te da 404, gemini-pro suele ser la solución inmediata
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash') 
-    print("✅ Configuración de Gemini preparada")
-except Exception as e:
-    print(f"❌ Error configurando Gemini: {e}")
+# --- CONFIGURACIÓN DE GEMINI ---
+# Tu clave API actual
+genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
 
 # --- PARCHE DE EMERGENCIA PARA DENSE LAYER ---
 @keras.saving.register_keras_serializable()
@@ -92,34 +84,38 @@ def get_dashboard():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- RUTA 2: CHATBOT (SOLUCIÓN AL 404) ---
+# --- RUTA 2: CHATBOT FLEXIBLE ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     try:
         data_request = request.json
         pregunta_usuario = data_request.get("pregunta")
         contexto = data_request.get("contexto", {})
+        # Recibimos el modelo que el usuario eligió en el selector
+        modelo_nombre = data_request.get("modelo", "gemini-1.5-flash")
+
+        # Inicializamos el modelo específico
+        model = genai.GenerativeModel(modelo_nombre)
 
         prompt = f"""
-        Actúa como un Consultor Estratégico de Eventos con IA.
-        DATOS ACTUALES: {contexto}
-        PREGUNTA: {pregunta_usuario}
-        INSTRUCCIÓN: Responde de forma breve y profesional basándote en los datos.
+        Actúa como un Consultor Senior de Eventos con IA.
+        DATOS ACTUALES DEL EVENTO: {contexto}
+        PREGUNTA DEL CLIENTE: "{pregunta_usuario}"
+        INSTRUCCIÓN: Responde de forma técnica y estratégica basándote en los datos.
         """
 
-        # Intentar generar contenido
-        try:
-            response = gemini_model.generate_content(prompt)
+        response = model.generate_content(prompt)
+        
+        if response and response.text:
             return jsonify({"respuesta": response.text})
-        except Exception as api_error:
-            # Si el modelo flash falla (404), intentamos con el pro automáticamente
-            print(f"Fallback activado por: {api_error}")
-            alt_model = genai.GenerativeModel('gemini-pro')
-            response = alt_model.generate_content(prompt)
-            return jsonify({"respuesta": response.text})
+        else:
+            return jsonify({"respuesta": "El modelo no devolvió texto. Prueba con otro modelo en el selector."})
 
     except Exception as e:
-        return jsonify({"respuesta": f"La IA está procesando otros datos. Error: {str(e)}"}), 500
+        print(f"Error con modelo {modelo_nombre}: {str(e)}")
+        return jsonify({
+            "respuesta": f"Error 404/Región: El modelo '{modelo_nombre}' no está disponible. Por favor, selecciona otro modelo en el menú desplegable de arriba."
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
