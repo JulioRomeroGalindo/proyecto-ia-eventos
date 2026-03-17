@@ -11,11 +11,13 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI ---
+# --- CONFIGURACIÓN DE GEMINI (VERSIÓN CORREGIDA) ---
 try:
-    # Tu API Key detectada
+    # Usamos tu clave detectada
     genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
-    # Modelo estable
+    
+    # IMPORTANTE: No usamos 'models/' al inicio, solo el nombre
+    # Si gemini-1.5-flash te da 404, gemini-pro suele ser la solución inmediata
     gemini_model = genai.GenerativeModel('gemini-1.5-flash') 
     print("✅ Configuración de Gemini preparada")
 except Exception as e:
@@ -32,12 +34,10 @@ def cargar_recursos():
     base_path = os.path.dirname(os.path.abspath(__file__))
     modelos = {}
     try:
-        # Carga de modelos Scikit-Learn
         modelos["asistencia"] = joblib.load(os.path.join(base_path, "model_attendance_v2.joblib"))
         modelos["rentabilidad"] = joblib.load(os.path.join(base_path, "model_profitability_v2.joblib"))
         modelos["segmentos"] = joblib.load(os.path.join(base_path, "model_segments_v2.joblib"))
         
-        # Carga de Red Neuronal con parche aplicado
         ruta_h5 = os.path.join(base_path, "model_revenue_v2.h5")
         modelos["revenue"] = keras.models.load_model(
             ruta_h5, 
@@ -52,7 +52,7 @@ def cargar_recursos():
 
 MODELS, ERROR_MSG = cargar_recursos()
 
-# --- RUTA 1: DASHBOARD (AUDITORÍA) ---
+# --- RUTA 1: DASHBOARD ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
@@ -92,38 +92,34 @@ def get_dashboard():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- RUTA 2: CHATBOT INTERACTIVO (ÚNICA INSTANCIA) ---
+# --- RUTA 2: CHATBOT (SOLUCIÓN AL 404) ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     try:
         data_request = request.json
         pregunta_usuario = data_request.get("pregunta")
-        contexto_modelos = data_request.get("contexto", {})
+        contexto = data_request.get("contexto", {})
 
         prompt = f"""
         Actúa como un Consultor Estratégico de Eventos con IA.
-        DATOS DE MODELOS DE MACHINE LEARNING:
-        - Registrados actual: {contexto_modelos.get('registrados')}
-        - Asistencia Predicha: {contexto_modelos.get('pred_asistencia')}
-        - Perfil: {contexto_modelos.get('perfil')}
-        - Ingresos: {contexto_modelos.get('revenue')}
-        - Ticket Promedio: {contexto_modelos.get('ticket_promedio')}
-
-        PREGUNTA DEL USUARIO: "{pregunta_usuario}"
-
-        INSTRUCCIÓN: Responde usando los datos técnicos. Si proponen cambios (ej. 5000 personas), 
-        proyecta resultados basados en la tasa de conversión y ticket promedio actual.
+        DATOS ACTUALES: {contexto}
+        PREGUNTA: {pregunta_usuario}
+        INSTRUCCIÓN: Responde de forma breve y profesional basándote en los datos.
         """
 
-        response = gemini_model.generate_content(prompt)
-        
-        if response and response.text:
+        # Intentar generar contenido
+        try:
+            response = gemini_model.generate_content(prompt)
             return jsonify({"respuesta": response.text})
-        else:
-            return jsonify({"respuesta": "La IA procesó la duda pero no generó texto. Intenta de nuevo."})
-    
+        except Exception as api_error:
+            # Si el modelo flash falla (404), intentamos con el pro automáticamente
+            print(f"Fallback activado por: {api_error}")
+            alt_model = genai.GenerativeModel('gemini-pro')
+            response = alt_model.generate_content(prompt)
+            return jsonify({"respuesta": response.text})
+
     except Exception as e:
-        return jsonify({"respuesta": f"Error en el cerebro de IA: {str(e)}"}), 500
+        return jsonify({"respuesta": f"La IA está procesando otros datos. Error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
