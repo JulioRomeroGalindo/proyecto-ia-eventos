@@ -9,26 +9,44 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CARGA DE MODELOS CON RUTA ABSOLUTA ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+# --- RASTREADOR DE MODELOS ---
 def load_models():
-    try:
-        m1 = joblib.load(os.path.join(BASE_DIR, 'model_attendance_v2.joblib'))
-        m2 = joblib.load(os.path.join(BASE_DIR, 'model_profitability_v2.joblib'))
-        m3 = joblib.load(os.path.join(BASE_DIR, 'model_segments_v2.joblib'))
-        m4 = tf.keras.models.load_model(os.path.join(BASE_DIR, 'model_revenue_v2.h5'), compile=False)
-        return m1, m2, m3, m4
-    except Exception as e:
-        print(f"CRITICAL ERROR LOADING MODELS: {e}")
-        return None, None, None, None
+    # Nombres exactos que deben estar en GitHub
+    files = {
+        "attend": "model_attendance_v2.joblib",
+        "profit": "model_profitability_v2.joblib",
+        "segments": "model_segments_v2.joblib",
+        "revenue": "model_revenue_v2.h5"
+    }
+    
+    loaded = {}
+    for key, name in files.items():
+        if os.path.exists(name):
+            try:
+                if name.endswith('.h5'):
+                    loaded[key] = tf.keras.models.load_model(name, compile=False)
+                else:
+                    loaded[key] = joblib.load(name)
+                print(f"✅ Cargado: {name}")
+            except Exception as e:
+                print(f"❌ Error cargando {name}: {e}")
+                loaded[key] = None
+        else:
+            print(f"⚠️ Archivo NO ENCONTRADO: {name}")
+            loaded[key] = None
+    return loaded
 
-m_attend, m_profit, m_segments, m_revenue = load_models()
+models = load_models()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     try:
-        # Carga de datos
+        # 1. Verificar si todos los modelos están presentes
+        if None in models.values():
+            missing = [k for k, v in models.items() if v is None]
+            return jsonify({"error": f"Modelos faltantes en el servidor: {missing}"}), 500
+
+        # 2. Leer CSV
         df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
         for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
@@ -39,22 +57,21 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float(df['COSTO_TOTAL'].mean())
 
-        # Si los modelos no cargaron, enviamos valores por defecto pero NO undefined
-        if m_attend is None:
-            return jsonify({"error": "Modelos no cargados en servidor"}), 500
-
-        # Predicciones
+        # 3. Predicciones
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
-        prob_att = m_attend.predict_proba(test_df)[0][1]
+        
+        # Asistencia
+        prob_att = models['attend'].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         
-        res_prof = m_profit.predict(test_df)[0]
-        res_seg = m_segments.predict(test_df.values)[0]
+        # Rentabilidad y Segmentos
+        res_prof = models['profit'].predict(test_df)[0]
+        res_seg = models['segments'].predict(test_df.values)[0]
         
+        # Revenue
         test_rev = np.array([[t_apuntados, avg_costo]])
-        pred_rev = float(m_revenue.predict(test_rev, verbose=0)[0][0])
+        pred_rev = float(models['revenue'].predict(test_rev, verbose=0)[0][0])
 
-        # LLAVES SIMPLIFICADAS
         return jsonify({
             "asistentes_reales": t_entran,
             "registrados": t_apuntados,
@@ -66,7 +83,7 @@ def get_dashboard():
             "revenue": f"${pred_rev:,.2f}"
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Error en procesamiento: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
