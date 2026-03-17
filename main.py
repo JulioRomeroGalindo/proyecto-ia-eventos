@@ -9,11 +9,10 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def cargar_modelos():
-    modelos = {}
+# --- SISTEMA DE CARGA DINÁMICA ---
+def cargar_recursos():
+    # Buscamos en la carpeta actual y en la carpeta del script
+    posibles_rutas = [os.getcwd(), os.path.dirname(os.path.abspath(__file__))]
     nombres = {
         "asistencia": "model_attendance_v2.joblib",
         "rentabilidad": "model_profitability_v2.joblib",
@@ -21,29 +20,47 @@ def cargar_modelos():
         "revenue": "model_revenue_v2.h5"
     }
     
+    modelos_cargados = {}
+    
     try:
-        modelos["asistencia"] = joblib.load(os.path.join(BASE_DIR, nombres["asistencia"]))
-        modelos["rentabilidad"] = joblib.load(os.path.join(BASE_DIR, nombres["rentabilidad"]))
-        modelos["segmentos"] = joblib.load(os.path.join(BASE_DIR, nombres["segmentos"]))
-        modelos["revenue"] = tf.keras.models.load_model(os.path.join(BASE_DIR, nombres["revenue"]), compile=False)
-        print("✅ TODOS LOS MODELOS CARGADOS DESDE:", BASE_DIR)
-        return modelos
+        for nick, archivo in nombres.items():
+            encontrado = False
+            for ruta in posibles_rutas:
+                ruta_completa = os.path.join(ruta, archivo)
+                if os.path.exists(ruta_completa):
+                    if archivo.endswith('.h5'):
+                        modelos_cargados[nick] = tf.keras.models.load_model(ruta_completa, compile=False)
+                    else:
+                        modelos_cargados[nick] = joblib.load(ruta_completa)
+                    print(f"✅ Cargado: {archivo} desde {ruta}")
+                    encontrado = True
+                    break
+            
+            if not encontrado:
+                print(f"❌ No se encontró: {archivo}")
+                return None, f"Archivo faltante: {archivo}. Vistos: {os.listdir(posibles_rutas[0])}"
+        
+        return modelos_cargados, None
     except Exception as e:
-        print(f"❌ ERROR CARGANDO MODELOS: {e}")
-        # Esto imprimirá en Render qué archivos SI existen para comparar
-        print("Archivos detectados:", os.listdir(BASE_DIR))
-        return None
+        return None, str(e)
 
-# Intentar cargar al iniciar
-MODELS = cargar_modelos()
+# Intentar carga global
+MODELS, ERROR_MSG = cargar_recursos()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
-    try:
+    global MODELS, ERROR_MSG
+    # Re-intentar si falló al inicio
+    if MODELS is None:
+        MODELS, ERROR_MSG = cargar_recursos()
         if MODELS is None:
-            return jsonify({"error": "Los modelos no están listos en el servidor"}), 500
+            return jsonify({"error": f"Modelos no listos: {ERROR_MSG}"}), 500
 
-        # Lectura de datos
+    try:
+        # Carga del CSV con manejo de errores
+        if not os.path.exists("REPORTE_MAESTRO_DEFINITIVO.csv"):
+            return jsonify({"error": "CSV no encontrado en el servidor"}), 500
+            
         df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
         for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
@@ -56,16 +73,12 @@ def get_dashboard():
 
         # Predicciones
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
-        
-        # 1. Asistencia
         prob_att = MODELS["asistencia"].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         
-        # 2. Rentabilidad y Segmentos
         res_prof = MODELS["rentabilidad"].predict(test_df)[0]
         res_seg = MODELS["segmentos"].predict(test_df.values)[0]
         
-        # 3. Revenue
         test_rev = np.array([[t_apuntados, avg_costo]])
         pred_rev = float(MODELS["revenue"].predict(test_rev, verbose=0)[0][0])
 
@@ -80,7 +93,7 @@ def get_dashboard():
             "revenue": f"${pred_rev:,.2f}"
         })
     except Exception as e:
-        return jsonify({"error": f"Fallo en proceso: {str(e)}"}), 500
+        return jsonify({"error": f"Error en Dashboard: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
