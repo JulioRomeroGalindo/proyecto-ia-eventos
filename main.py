@@ -6,13 +6,13 @@ import tensorflow as tf
 from flask import Flask, jsonify
 from flask_cors import CORS
 
-# Forzar a Keras a usar el formato moderno si es necesario
+# Forzamos a que Keras use TensorFlow como motor
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
 app = Flask(__name__)
 CORS(app)
 
-# --- SISTEMA DE CARGA CON PARCHE DE COMPATIBILIDAD ---
+# --- SISTEMA DE CARGA CON PARCHE PARA KERAS 3 ---
 def cargar_recursos():
     base_path = os.path.dirname(os.path.abspath(__file__))
     nombres = {
@@ -25,44 +25,45 @@ def cargar_recursos():
     recursos = {}
     
     try:
-        # Carga de modelos Joblib (Scikit-Learn)
+        # 1. Cargar modelos de Scikit-Learn (Joblib)
         recursos["asistencia"] = joblib.load(os.path.join(base_path, nombres["asistencia"]))
         recursos["rentabilidad"] = joblib.load(os.path.join(base_path, nombres["rentabilidad"]))
         recursos["segmentos"] = joblib.load(os.path.join(base_path, nombres["segmentos"]))
         
-        # Carga de modelo H5 (TensorFlow/Keras) con PARCHE para 'quantization_config'
+        # 2. Cargar Red Neuronal (H5) con PARCHE DE COMPATIBILIDAD
+        # safe_mode=False permite ignorar campos desconocidos como 'quantization_config'
         ruta_h5 = os.path.join(base_path, nombres["revenue"])
         recursos["revenue"] = tf.keras.models.load_model(
             ruta_h5, 
             compile=False, 
-            safe_mode=False  # <--- ESTO ARREGLA EL ERROR DE DESERIALIZACIÓN
+            safe_mode=False 
         )
         
-        print("✅ Todos los modelos v2 cargados exitosamente.")
+        print("✅ ÉXITO: Todos los modelos v2 y Red Neuronal cargados.")
         return recursos, None
     except Exception as e:
-        print(f"❌ Error en carga: {str(e)}")
+        print(f"❌ ERROR CRÍTICO EN CARGA: {str(e)}")
         return None, str(e)
 
-# Inicialización global
+# Intentar cargar al arrancar el servidor
 MODELS, ERROR_MSG = cargar_recursos()
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
     
-    # Reintento de carga si falló al arrancar
+    # Si falló la carga inicial, reintentamos (útil en despliegues lentos de Render)
     if MODELS is None:
         MODELS, ERROR_MSG = cargar_recursos()
         if MODELS is None:
-            return jsonify({"error": f"Error de Modelos: {ERROR_MSG}"}), 500
+            return jsonify({"error": f"Modelos no listos: {ERROR_MSG}"}), 500
 
     try:
-        # 1. Carga de Datos CSV
+        # --- PROCESAMIENTO DE DATOS ---
         csv_path = os.path.join(os.path.dirname(__file__), "REPORTE_MAESTRO_DEFINITIVO.csv")
         df = pd.read_csv(csv_path, sep=';', encoding='utf-16')
         
-        # Limpieza de columnas numéricas
+        # Limpieza estándar de moneda/puntos
         for col in ['ENTRAN', 'APUNTADOS', 'VALOR_TICKET', 'VALOR_CONSUMIBLE']:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0)
         
@@ -72,24 +73,23 @@ def get_dashboard():
         t_entran = int(df['ENTRAN'].sum())
         avg_costo = float(df['COSTO_TOTAL'].mean())
 
-        # 2. Inferencia con Modelos
+        # --- PREDICCIONES ---
         test_df = pd.DataFrame([[avg_costo]], columns=['COSTO_TOTAL'])
         
-        # Modelo Asistencia
+        # Probabilidad de Asistencia
         prob_att = MODELS["asistencia"].predict_proba(test_df)[0][1]
         pred_asistencia = int(t_apuntados * prob_att)
         
-        # Modelo Rentabilidad
+        # Clasificación de Rentabilidad y Segmento
         res_prof = MODELS["rentabilidad"].predict(test_df)[0]
-        
-        # Modelo Segmentación (usando valores planos para evitar warnings de nombres de columnas)
         res_seg = MODELS["segmentos"].predict(test_df.values)[0]
         
-        # Modelo Revenue (Red Neuronal)
+        # Predicción de Ingresos (Red Neuronal)
+        # Aseguramos que el input sea float32 para evitar conflictos con la red
         input_nn = np.array([[t_apuntados, avg_costo]], dtype=np.float32)
         pred_rev = float(MODELS["revenue"].predict(input_nn, verbose=0)[0][0])
 
-        # 3. Respuesta Final
+        # --- RESPUESTA JSON ---
         return jsonify({
             "asistentes_reales": t_entran,
             "registrados": t_apuntados,
@@ -102,9 +102,9 @@ def get_dashboard():
         })
 
     except Exception as e:
-        return jsonify({"error": f"Error en procesamiento: {str(e)}"}), 500
+        return jsonify({"error": f"Error en ejecución: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    # Render usa la variable de entorno PORT
+    # Render asigna dinámicamente el puerto
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
