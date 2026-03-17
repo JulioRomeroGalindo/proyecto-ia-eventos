@@ -11,11 +11,14 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI ---
-# Tu clave API actual
-genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
+# --- CONFIGURACIÓN DE GEMINI ACTUALIZADA ---
+try:
+    genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
+    print("✅ API de Google Generative AI configurada")
+except Exception as e:
+    print(f"❌ Error en configuración inicial: {e}")
 
-# --- PARCHE DE EMERGENCIA PARA DENSE LAYER ---
+# --- PARCHE PARA DENSE LAYER (MANTENIDO) ---
 @keras.saving.register_keras_serializable()
 class CustomDense(keras.layers.Dense):
     def __init__(self, *args, **kwargs):
@@ -36,15 +39,14 @@ def cargar_recursos():
             custom_objects={"Dense": CustomDense},
             compile=False
         )
-        print("✅ SISTEMA OPERATIVO: Modelos cargados con éxito.")
+        print("✅ Modelos de ML cargados con éxito.")
         return modelos, None
     except Exception as e:
-        print(f"❌ Error carga: {e}")
+        print(f"❌ Error carga modelos: {e}")
         return None, str(e)
 
 MODELS, ERROR_MSG = cargar_recursos()
 
-# --- RUTA 1: DASHBOARD ---
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard():
     global MODELS, ERROR_MSG
@@ -84,24 +86,29 @@ def get_dashboard():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- RUTA 2: CHATBOT FLEXIBLE ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     try:
         data_request = request.json
         pregunta_usuario = data_request.get("pregunta")
         contexto = data_request.get("contexto", {})
-        # Recibimos el modelo que el usuario eligió en el selector
         modelo_nombre = data_request.get("modelo", "gemini-1.5-flash")
 
-        # Inicializamos el modelo específico
-        model = genai.GenerativeModel(modelo_nombre)
+        # Asegurar formato correcto del nombre del modelo
+        if not modelo_nombre.startswith('models/'):
+            modelo_nombre = f"models/{modelo_nombre}"
+
+        # Configuración del modelo con parámetros de generación
+        model = genai.GenerativeModel(
+            model_name=modelo_nombre,
+            generation_config={"temperature": 0.7, "top_p": 0.95, "max_output_tokens": 1024}
+        )
 
         prompt = f"""
         Actúa como un Consultor Senior de Eventos con IA.
         DATOS ACTUALES DEL EVENTO: {contexto}
         PREGUNTA DEL CLIENTE: "{pregunta_usuario}"
-        INSTRUCCIÓN: Responde de forma técnica y estratégica basándote en los datos.
+        INSTRUCCIÓN: Usa los datos para dar una respuesta estratégica.
         """
 
         response = model.generate_content(prompt)
@@ -109,12 +116,12 @@ def chat_interactivo():
         if response and response.text:
             return jsonify({"respuesta": response.text})
         else:
-            return jsonify({"respuesta": "El modelo no devolvió texto. Prueba con otro modelo en el selector."})
+            return jsonify({"respuesta": "El modelo no pudo generar una respuesta. Prueba con otro modelo."})
 
     except Exception as e:
-        print(f"Error con modelo {modelo_nombre}: {str(e)}")
+        print(f"❌ Error en Chat: {str(e)}")
         return jsonify({
-            "respuesta": f"Error 404/Región: El modelo '{modelo_nombre}' no está disponible. Por favor, selecciona otro modelo en el menú desplegable de arriba."
+            "respuesta": f"Lo siento, el modelo {modelo_nombre} no respondió. Detalles: {str(e)}"
         }), 500
 
 if __name__ == '__main__':
