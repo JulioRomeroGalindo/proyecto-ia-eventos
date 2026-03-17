@@ -72,54 +72,40 @@ def get_dashboard():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# --- RUTA 2: CHAT (SOLUCIÓN DIRECTA SIN ERROR 404) ---
 @app.route('/api/v1/chat', methods=['POST'])
 def chat_interactivo():
     if not api_key:
-        return jsonify({"respuesta": "Error: GEMINI_API_KEY no configurada en Render"}), 500
+        return jsonify({"respuesta": "Error: GEMINI_API_KEY no configurada"}), 500
         
     try:
         data = request.json
         pregunta = data.get("pregunta", "")
         contexto = str(data.get("contexto", ""))
 
-        # URL forzada a la versión estable V1
+        # URL CON EL PREFIJO 'models/' (ESTO QUITA EL ERROR 404 DE LA V1)
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
         
         headers = {'Content-Type': 'application/json'}
-        
-        # Estructura de JSON robusta para Google API
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"Eres un consultor experto. Contexto técnico: {contexto}\n\nPregunta: {pregunta}"}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1000
-            }
+            "contents": [{
+                "parts": [{"text": f"Contexto: {contexto}\nPregunta: {pregunta}"}]
+            }]
         }
 
         response = requests.post(url, json=payload, headers=headers)
         res_data = response.json()
 
         if response.status_code == 200:
-            # Extracción del texto de la respuesta
-            try:
-                texto_ia = res_data['candidates'][0]['content']['parts'][0]['text']
-                return jsonify({"respuesta": texto_ia})
-            except (KeyError, IndexError):
-                return jsonify({"respuesta": "Respuesta recibida pero con formato inválido."}), 500
+            texto_ia = res_data['candidates'][0]['content']['parts'][0]['text']
+            return jsonify({"respuesta": texto_ia})
         else:
-            # Captura el error real de Google (ej: cuota excedida o key inválida)
-            msg = res_data.get('error', {}).get('message', 'Error desconocido en Google AI')
-            return jsonify({"respuesta": f"Google AI dice: {msg}"}), response.status_code
+            # Si vuelve a fallar, este mensaje nos dirá el modelo exacto que Google SÍ permite
+            error_info = res_data.get('error', {}).get('message', 'Error desconocido')
+            return jsonify({"respuesta": f"Google dice: {error_info}"}), response.status_code
 
     except Exception as e:
-        return jsonify({"respuesta": f"Fallo de conexión en servidor: {str(e)}"}), 500
-
+        return jsonify({"respuesta": f"Error: {str(e)}"}), 500
+        
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
