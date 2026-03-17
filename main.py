@@ -7,44 +7,48 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+# Configuración de CORS abierta para evitar el bloqueo en AI Studio
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # --- CARGA DE DATOS Y MODELOS ---
 try:
-    # Usamos el nombre exacto de tu archivo
+    # Carga del CSV
     master_df = pd.read_csv("REPORTE_MAESTRO_DEFINITIVO.csv", sep=';', encoding='utf-16')
     
-    # IMPORTANTE: Estos nombres deben ser los mismos que descargaste de Colab
+    # Carga de modelos (asegúrate de que estos archivos estén en tu repo de GitHub)
     m_attend = joblib.load('model_attendance.joblib')
-    m_profit = joblib.load('model_profitability.joblib')
-    m_nn = tf.keras.models.load_model('model_revenue.h5', compile=False)
+    # m_profit = joblib.load('model_profitability.joblib') # Opcional si lo usas luego
+    # m_nn = tf.keras.models.load_model('model_revenue.h5', compile=False) # Opcional
     
     print("✅ Recursos cargados exitosamente")
 except Exception as e:
     print(f"❌ Error al cargar archivos: {e}")
+    # Creamos un DF vacío por si falla la carga para que el server no crashee
+    master_df = pd.DataFrame()
 
 @app.route('/')
 def health_check():
-    return jsonify({"status": "online", "message": "Servidor de Eventos en Render listo"})
+    return jsonify({"status": "online", "message": "Servidor de Eventos listo"})
 
 @app.route('/api/v1/kpi/dashboard', methods=['GET'])
 def get_dashboard_kpis():
     try:
+        # Cálculos de lógica de negocio
         total_entran = int(master_df['ENTRAN'].sum())
         total_apuntados = int(master_df['APUNTADOS'].sum())
         conversion_rate = (total_entran / total_apuntados * 100) if total_apuntados > 0 else 0
         
-        # Ajustado a tu columna 'TIPO_COBRO'
-        pagan_penalidad = master_df[master_df['TIPO_COBRO'].str.contains('Penalidad', na=False, case=False)].shape[0]
-        penalty_ratio = (pagan_penalidad / len(master_df) * 100) if len(master_df) > 0 else 0
-        
+        # Predicción base usando el promedio de apuntados para el dashboard inicial
+        avg_apuntados = master_df['APUNTADOS'].mean()
+        pred_base = m_attend.predict(np.array([[avg_apuntados]]))[0]
+
+        # IMPORTANTE: Estos nombres de llaves coinciden con tu Dashboard de AI Studio
         return jsonify({
-            "business_performance": {
-                "conversion_rate": f"{conversion_rate:.2f}%",
-                "penalty_ratio": f"{penalty_ratio:.2f}%",
-                "total_guests": total_entran,
-                "avg_ticket": int(master_df['VALOR_TICKET'].mean())
-            }
+            "total_invitados": total_entran,
+            "tasa_conversion": f"{conversion_rate:.2f}%",
+            "prediccion_asistencia": int(pred_base),
+            "total_registrados": total_apuntados,
+            "ticket_promedio": int(master_df['VALOR_TICKET'].mean())
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -53,8 +57,7 @@ def get_dashboard_kpis():
 def pred_attend():
     try:
         data = request.json
-        apuntados = data.get('apuntados', 0)
-        # Tu modelo espera una matriz 2D [[valor]]
+        apuntados = data.get('apuntados', 100) # valor por defecto
         prediction = m_attend.predict(np.array([[apuntados]]))
         return jsonify({"asistencia_estimada": int(prediction[0])})
     except Exception as e:
