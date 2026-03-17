@@ -11,10 +11,48 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# --- CONFIGURACIÓN DE GEMINI ---
-# Reemplaza con la llave que obtuviste en Google AI Studio
-genai.configure(api_key="AIzaSyAMkWJ5l6NZ1-g9znxNblGKDegQsWEAnGo")
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+# --- CONFIGURACIÓN DE GEMINI CORREGIDA ---
+try:
+    genai.configure(api_key="TU_API_KEY_AQUÍ")
+    # Forzamos el uso de gemini-1.5-flash-latest que es la versión más estable
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash') 
+    print("✅ Configuración de Gemini preparada")
+except Exception as e:
+    print(f"❌ Error configurando Gemini: {e}")
+
+# --- RUTA CHATBOT ACTUALIZADA ---
+@app.route('/api/v1/chat', methods=['POST'])
+def chat_interactivo():
+    try:
+        data_request = request.json
+        pregunta_usuario = data_request.get("pregunta")
+        contexto_modelos = data_request.get("contexto", {})
+
+        prompt = f"""
+        Actúa como un Consultor Senior de Eventos.
+        DATOS DE MIS MODELOS DE IA:
+        - Registrados: {contexto_modelos.get('registrados')}
+        - Asistencia Predicha: {contexto_modelos.get('pred_asistencia')}
+        - Perfil: {contexto_modelos.get('perfil')}
+        - Ingresos: {contexto_modelos.get('revenue')}
+        
+        PREGUNTA: "{pregunta_usuario}"
+        
+        Instrucción: Usa los datos para dar una respuesta técnica y estratégica.
+        """
+
+        # Añadimos un manejo de error específico aquí para ver qué pasa
+        response = gemini_model.generate_content(prompt)
+        
+        if response and response.text:
+            return jsonify({"respuesta": response.text})
+        else:
+            return jsonify({"respuesta": "La IA no pudo generar una respuesta clara."})
+    
+    except Exception as e:
+        # Si sale el error 404 de nuevo, imprimimos el detalle en la consola de Render
+        print(f"DEBUG ERROR CHAT: {str(e)}")
+        return jsonify({"respuesta": f"Error de conexión con el modelo: {str(e)}"}), 500
 
 # --- PARCHE DE EMERGENCIA PARA DENSE LAYER (MANTENIDO) ---
 @keras.saving.register_keras_serializable()
